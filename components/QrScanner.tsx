@@ -90,9 +90,8 @@ export default function QrScanner() {
     const video = container?.querySelector('video') as HTMLVideoElement | null;
     if (!video || video.videoWidth === 0) return null;
 
-    // 処理速度のため長辺1000px程度に縮小する(チケット番号の広範囲読み取りが不要になった分、
-    // 整理番号の文字をより鮮明に読み取れるよう解像度を引き上げている)
-    const maxSide = 1000;
+    // 処理速度とのバランスで長辺1280px程度に縮小する
+    const maxSide = 1280;
     const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
     const width = Math.round(video.videoWidth * scale);
     const height = Math.round(video.videoHeight * scale);
@@ -107,7 +106,42 @@ export default function QrScanner() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, width, height);
+
+    applyGrayscaleContrastEnhancement(ctx, width, height);
+
     return canvas;
+  }
+
+  // グレースケール化+コントラスト強調(ヒストグラムの最小・最大値で引き伸ばす)。
+  // 手ブレや室内照明で文字の濃淡差が乏しいフレームでも、文字と背景の境界を
+  // はっきりさせることでOCRの認識率を上げることを狙っている。
+  function applyGrayscaleContrastEnhancement(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number
+  ) {
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    const grayValues = new Uint8ClampedArray(data.length / 4);
+
+    let min = 255;
+    let max = 0;
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      grayValues[p] = gray;
+      if (gray < min) min = gray;
+      if (gray > max) max = gray;
+    }
+
+    const range = Math.max(1, max - min);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const stretched = ((grayValues[p] - min) / range) * 255;
+      data[i] = stretched;
+      data[i + 1] = stretched;
+      data[i + 2] = stretched;
+    }
+
+    ctx.putImageData(imageData, 0, 0);
   }
 
   return (
