@@ -9,7 +9,7 @@ service cloud.firestore {
 
       allow create: if request.resource.data.keys().hasOnly([
                         'scannedAt', 'rawText',
-                        'ocrSeatNumber', 'ocrTicketNumber', 'ocrApplicationNumber'
+                        'ocrSeatNumber', 'ocrApplicationNumber'
                       ])
                     && request.resource.data.scannedAt == request.time
                     && request.resource.data.rawText is string
@@ -17,9 +17,6 @@ service cloud.firestore {
                     && (!('ocrSeatNumber' in request.resource.data)
                         || (request.resource.data.ocrSeatNumber is string
                             && request.resource.data.ocrSeatNumber.size() <= 50))
-                    && (!('ocrTicketNumber' in request.resource.data)
-                        || (request.resource.data.ocrTicketNumber is string
-                            && request.resource.data.ocrTicketNumber.size() <= 50))
                     && (!('ocrApplicationNumber' in request.resource.data)
                         || (request.resource.data.ocrApplicationNumber is string
                             && request.resource.data.ocrApplicationNumber.size() <= 50));

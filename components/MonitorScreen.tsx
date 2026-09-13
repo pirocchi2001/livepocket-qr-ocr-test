@@ -8,7 +8,6 @@ interface ScanRow {
   id: string;
   rawText: string;
   ocrSeatNumber?: string;
-  ocrTicketNumber?: string;
   ocrApplicationNumber?: string;
   scannedAt?: Timestamp;
 }
@@ -30,7 +29,6 @@ export default function MonitorScreen() {
           id: doc.id,
           rawText: data.rawText ?? '',
           ocrSeatNumber: data.ocrSeatNumber,
-          ocrTicketNumber: data.ocrTicketNumber,
           ocrApplicationNumber: data.ocrApplicationNumber,
           scannedAt: data.scannedAt,
         };
@@ -53,7 +51,6 @@ export default function MonitorScreen() {
               <th className="p-2">読み取り時刻</th>
               <th className="p-2">QRの内容</th>
               <th className="p-2">整理番号</th>
-              <th className="p-2">チケット番号</th>
               <th className="p-2">申込番号</th>
             </tr>
           </thead>
@@ -65,7 +62,6 @@ export default function MonitorScreen() {
                   {row.rawText}
                 </td>
                 <td className="p-2">{row.ocrSeatNumber ?? ''}</td>
-                <td className="p-2">{row.ocrTicketNumber ?? ''}</td>
                 <td className="p-2">{row.ocrApplicationNumber ?? ''}</td>
               </tr>
             ))}

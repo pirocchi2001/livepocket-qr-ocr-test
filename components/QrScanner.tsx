@@ -66,7 +66,7 @@ export default function QrScanner() {
       const frame = captureVideoFrame();
       const ocr = frame
         ? await recognizeWithTimeout(frame)
-        : { seatNumber: null, ticketNumber: null, applicationNumber: null };
+        : { seatNumber: null, applicationNumber: null };
 
       await saveScan(decodedText, ocr);
 
@@ -90,8 +90,9 @@ export default function QrScanner() {
     const video = container?.querySelector('video') as HTMLVideoElement | null;
     if (!video || video.videoWidth === 0) return null;
 
-    // 処理速度のため長辺800px程度に縮小する
-    const maxSide = 800;
+    // 処理速度のため長辺1000px程度に縮小する(チケット番号の広範囲読み取りが不要になった分、
+    // 整理番号の文字をより鮮明に読み取れるよう解像度を引き上げている)
+    const maxSide = 1000;
     const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
     const width = Math.round(video.videoWidth * scale);
     const height = Math.round(video.videoHeight * scale);
@@ -125,7 +126,6 @@ export default function QrScanner() {
           <div className="space-y-1 text-left text-sm">
             <p className="break-all text-emerald-400">読み取りました: {lastResult.rawText}</p>
             <p>整理番号: {lastResult.ocr.seatNumber ?? '(未認識)'}</p>
-            <p>チケット番号: {lastResult.ocr.ticketNumber ?? '(未認識)'}</p>
             <p>申込番号: {lastResult.ocr.applicationNumber ?? '(未認識)'}</p>
           </div>
         )}

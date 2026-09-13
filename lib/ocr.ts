@@ -37,48 +37,39 @@ export function warmUpOcrWorker() {
 
 export interface OcrExtractedFields {
   seatNumber: string | null; // 整理番号
-  ticketNumber: string | null; // チケット番号
   applicationNumber: string | null; // 申込番号
 }
 
 const EMPTY_FIELDS: OcrExtractedFields = {
   seatNumber: null,
-  ticketNumber: null,
   applicationNumber: null,
 };
 
-// 認識済みテキスト全体から、パターンに基づいて3項目を抽出する。
-// 各項目は独立して探すため、どれか1つだけ見つかる場合もある。
+// 認識済みテキスト全体から、パターンに基づいて項目を抽出する。
 export function extractFields(rawOcrText: string): OcrExtractedFields {
   const text = rawOcrText.toUpperCase();
   const tokens = text.match(/[A-Z0-9]+/g) ?? [];
 
   let seatNumber: string | null = null;
-  let ticketNumber: string | null = null;
   let applicationNumber: string | null = null;
 
   for (const token of tokens) {
-    // チケット番号: 英字のみで15〜30文字程度の長い塊。
-    // 実際のチケット番号(例: GUZPAJXCBLLIYNTGTSWI)は数字を含まないため、
-    // 数字が混じる塊(日付・時間表記の読み間違いなど)を誤って拾わないよう、
-    // 「英字のみ」を必須条件にしている。
-    if (!ticketNumber && /^[A-Z]{15,30}$/.test(token)) {
-      ticketNumber = token;
-      continue;
-    }
     // 申込番号: 数字のみ9〜12桁
     if (!applicationNumber && /^\d{9,12}$/.test(token)) {
       applicationNumber = token;
       continue;
     }
-    // 整理番号: 英字1〜2文字+数字2〜5桁、の短い塊(例: A907)
-    if (!seatNumber && /^[A-Z]{1,2}\d{2,5}$/.test(token)) {
+    // 整理番号: 英字1〜2文字+数字2〜5桁、の短い塊(例: A907)。
+    // チケット画面内では、整理番号は商品説明文(誤読の元になりやすい日付・時間表記を含む)
+    // より後ろに表示されるため、最初に見つかった候補ではなく「最後に見つかった候補」を
+    // 採用することで、説明文由来の誤検出を拾いにくくしている。
+    if (/^[A-Z]{1,2}\d{2,5}$/.test(token)) {
       seatNumber = token;
       continue;
     }
   }
 
-  return { seatNumber, ticketNumber, applicationNumber };
+  return { seatNumber, applicationNumber };
 }
 
 // キャンバス画像に対してOCRを実行し、指定時間内に終わらなければnullを返す(スキップ扱い)。

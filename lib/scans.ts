@@ -9,7 +9,6 @@ export async function saveScan(rawText: string, ocr: OcrExtractedFields) {
   };
   // 認識できなかった項目はキー自体を含めない(FirestoreルールのhasOnly判定に合わせる)
   if (ocr.seatNumber) data.ocrSeatNumber = ocr.seatNumber;
-  if (ocr.ticketNumber) data.ocrTicketNumber = ocr.ticketNumber;
   if (ocr.applicationNumber) data.ocrApplicationNumber = ocr.applicationNumber;
 
   await addDoc(collection(db, 'scans'), data);
