@@ -1,12 +1,14 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
+import jsQR, { QRCode } from 'jsqr';
 import { recognizeWithTimeout, warmUpOcrWorker, OcrExtractedFields } from '@/lib/ocr';
 import { saveScan } from '@/lib/scans';
+import { computeSeatNumberCropBox, CropBox } from '@/lib/qr-geometry';
 
-const READER_ELEMENT_ID = 'qr-reader-region';
 const RESULT_DISPLAY_MS = 900;
+const DETECTION_MAX_SIDE = 480; // QR検出用に縮小するサイズ(速度優先)
+const CROP_UPSCALE_TARGET = 600; // 切り出した整理番号領域を、この幅程度まで拡大してからOCRする
 
 type Phase = 'scanning' | 'processing' | 'result';
 
@@ -20,57 +22,123 @@ export default function QrScanner() {
   const [lastResult, setLastResult] = useState<LastResult | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
 
-  const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const fullCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isProcessingRef = useRef(false);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
     warmUpOcrWorker();
+    let cancelled = false;
 
-    const html5QrCode = new Html5Qrcode(READER_ELEMENT_ID);
-    html5QrCodeRef.current = html5QrCode;
-
-    html5QrCode
-      .start(
-        { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 260, height: 260 } },
-        (decodedText) => {
-          void handleScanSuccess(decodedText);
-        },
-        () => {
-          // デコード失敗は毎フレーム起こり得るため無視する
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false,
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
         }
-      )
-      .catch((err) => {
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      } catch (err) {
         setErrorText('カメラを起動できませんでした。カメラの使用許可を確認してください。');
         console.error(err);
-      });
+      }
+    }
+
+    function tick() {
+      if (!isProcessingRef.current) {
+        scanFrame();
+      }
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    start();
 
     return () => {
-      html5QrCode
-        .stop()
-        .then(() => html5QrCode.clear())
-        .catch(() => {
-          /* すでに停止している場合は無視 */
-        });
+      cancelled = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      streamRef.current?.getTracks().forEach((t) => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleScanSuccess(decodedText: string) {
+  function scanFrame() {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0) return;
+
+    const scale = Math.min(1, DETECTION_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
+    const dWidth = Math.max(1, Math.round(video.videoWidth * scale));
+    const dHeight = Math.max(1, Math.round(video.videoHeight * scale));
+
+    if (!detectionCanvasRef.current) {
+      detectionCanvasRef.current = document.createElement('canvas');
+    }
+    const dCanvas = detectionCanvasRef.current;
+    dCanvas.width = dWidth;
+    dCanvas.height = dHeight;
+    const dCtx = dCanvas.getContext('2d', { willReadFrequently: true });
+    if (!dCtx) return;
+    dCtx.drawImage(video, 0, 0, dWidth, dHeight);
+
+    let imageData: ImageData;
+    try {
+      imageData = dCtx.getImageData(0, 0, dWidth, dHeight);
+    } catch {
+      return;
+    }
+
+    const result = jsQR(imageData.data, dWidth, dHeight, {
+      inversionAttempts: 'dontInvert',
+    });
+
+    if (result && result.data) {
+      void handleScanSuccess(result, dWidth);
+    }
+  }
+
+  async function handleScanSuccess(qr: QRCode, detectionWidth: number) {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     setPhase('processing');
 
     try {
-      const frame = captureVideoFrame();
-      const ocr = frame
-        ? await recognizeWithTimeout(frame)
-        : { seatNumber: null, applicationNumber: null };
+      const video = videoRef.current;
+      let ocr: OcrExtractedFields = { seatNumber: null, applicationNumber: null };
 
-      await saveScan(decodedText, ocr);
+      if (video && video.videoWidth > 0) {
+        // 検出時の縮小画像 → 実際の映像解像度へのスケール比
+        const scaleUp = video.videoWidth / detectionWidth;
+        const toFullRes = (p: { x: number; y: number }) => ({
+          x: p.x * scaleUp,
+          y: p.y * scaleUp,
+        });
 
-      setLastResult({ rawText: decodedText, ocr });
+        const corners = {
+          topLeft: toFullRes(qr.location.topLeftCorner),
+          topRight: toFullRes(qr.location.topRightCorner),
+          bottomLeft: toFullRes(qr.location.bottomLeftCorner),
+        };
+
+        const cropBox = computeSeatNumberCropBox(corners, video.videoWidth, video.videoHeight);
+        const cropCanvas = renderCropCanvas(video, cropBox);
+        if (cropCanvas) {
+          ocr = await recognizeWithTimeout(cropCanvas);
+        }
+      }
+
+      await saveScan(qr.data, ocr);
+      setLastResult({ rawText: qr.data, ocr });
       setPhase('result');
 
       setTimeout(() => {
@@ -85,36 +153,49 @@ export default function QrScanner() {
     }
   }
 
-  function captureVideoFrame(): HTMLCanvasElement | null {
-    const container = document.getElementById(READER_ELEMENT_ID);
-    const video = container?.querySelector('video') as HTMLVideoElement | null;
-    if (!video || video.videoWidth === 0) return null;
-
-    // 処理速度とのバランスで長辺1280px程度に縮小する
-    const maxSide = 1280;
-    const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
-    const width = Math.round(video.videoWidth * scale);
-    const height = Math.round(video.videoHeight * scale);
-
-    if (!canvasRef.current) {
-      canvasRef.current = document.createElement('canvas');
+  function renderCropCanvas(video: HTMLVideoElement, box: CropBox): HTMLCanvasElement | null {
+    if (!fullCanvasRef.current) {
+      fullCanvasRef.current = document.createElement('canvas');
     }
-    const canvas = canvasRef.current;
-    canvas.width = width;
-    canvas.height = height;
+    const fullCanvas = fullCanvasRef.current;
+    fullCanvas.width = video.videoWidth;
+    fullCanvas.height = video.videoHeight;
+    const fullCtx = fullCanvas.getContext('2d');
+    if (!fullCtx) return null;
+    fullCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
-    const ctx = canvas.getContext('2d');
+    if (!cropCanvasRef.current) {
+      cropCanvasRef.current = document.createElement('canvas');
+    }
+    const cropCanvas = cropCanvasRef.current;
+
+    // 切り出した範囲を、OCRが読みやすい大きさまで拡大する(最大4倍まで)
+    const upscale = Math.min(4, Math.max(1, CROP_UPSCALE_TARGET / Math.max(box.width, 1)));
+    const outWidth = Math.max(1, Math.round(box.width * upscale));
+    const outHeight = Math.max(1, Math.round(box.height * upscale));
+    cropCanvas.width = outWidth;
+    cropCanvas.height = outHeight;
+
+    const ctx = cropCanvas.getContext('2d');
     if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, width, height);
+    ctx.drawImage(
+      fullCanvas,
+      box.x,
+      box.y,
+      box.width,
+      box.height,
+      0,
+      0,
+      outWidth,
+      outHeight
+    );
 
-    applyGrayscaleContrastEnhancement(ctx, width, height);
+    applyGrayscaleContrastEnhancement(ctx, outWidth, outHeight);
 
-    return canvas;
+    return cropCanvas;
   }
 
   // グレースケール化+コントラスト強調(ヒストグラムの最小・最大値で引き伸ばす)。
-  // 手ブレや室内照明で文字の濃淡差が乏しいフレームでも、文字と背景の境界を
-  // はっきりさせることでOCRの認識率を上げることを狙っている。
   function applyGrayscaleContrastEnhancement(
     ctx: CanvasRenderingContext2D,
     width: number,
@@ -146,10 +227,19 @@ export default function QrScanner() {
 
   return (
     <div className="flex flex-col items-center gap-3">
-      <div
-        id={READER_ELEMENT_ID}
-        className="w-full max-w-sm overflow-hidden rounded-xl border border-slate-700"
-      />
+      <div className="relative w-full max-w-sm overflow-hidden rounded-xl border border-slate-700 bg-black">
+        <video
+          ref={videoRef}
+          className="w-full"
+          autoPlay
+          muted
+          playsInline
+        />
+        {/* 位置合わせの目安用(切り出し処理には使用していない、見た目のガイドのみ) */}
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="h-2/5 w-2/5 rounded-lg border-2 border-emerald-400/70" />
+        </div>
+      </div>
 
       {errorText && <p className="text-sm text-red-400">{errorText}</p>}
 
