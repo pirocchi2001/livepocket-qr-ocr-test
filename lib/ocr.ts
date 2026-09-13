@@ -1,7 +1,10 @@
 import { createWorker, Worker } from 'tesseract.js';
 
-// OCR認識に許可する文字種(英大文字+数字のみ。誤認識抑制と速度向上のため)
-const CHAR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+// OCR認識に許可する文字種(英大文字+数字+空白)。
+// 空白を許可しないと、画面内の無関係なテキスト(商品説明など)が単語の境界なく
+// 連結されてしまい、誤って長い1つの塊として抽出される事故が起きるため、
+// 単語の区切りを保つ目的で空白も許可している。
+const CHAR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ';
 
 // 1回のOCR処理に許容する最大時間(ミリ秒)。これを超えたら結果を破棄してスキップ扱いにする。
 export const OCR_TIME_BUDGET_MS = 1200;
