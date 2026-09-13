@@ -11,8 +11,9 @@ const DETECTION_MAX_SIDE = 480; // QR検出用に縮小するサイズ(速度優
 const CROP_UPSCALE_TARGET = 600; // 切り出した整理番号領域を、この幅程度まで拡大してからOCRする
 const NUM_CAPTURES = 3; // 手ブレ対策として複数フレームを撮り、多数決で結果を決める枚数
 const CAPTURE_INTERVAL_MS = 60; // 各フレームキャプチャの間隔
+const SETTLE_DELAY_MS = 400; // QR検出後、実際の撮影までの「静止待ち」時間
 
-type Phase = 'scanning' | 'processing' | 'result';
+type Phase = 'scanning' | 'holding' | 'processing' | 'result';
 
 interface LastResult {
   rawText: string;
@@ -123,7 +124,7 @@ export default function QrScanner() {
   async function handleScanSuccess(qr: QRCode, detectionWidth: number, detectionHeight: number) {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
-    setPhase('processing');
+    setPhase('holding');
 
     // 検出したQRの位置に合わせて、ロックオン表示(緑の枠+読み取り範囲のハイライト)を表示する
     const toPercent = (p: { x: number; y: number }): PercentPoint => ({
@@ -156,6 +157,11 @@ export default function QrScanner() {
     setFlashKey((k) => k + 1);
 
     try {
+      // QR検出直後は手ブレ・オートフォーカスの途中であることが多いため、
+      // 実際の撮影(OCR用のキャプチャ)は少し待ってから行う
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_DELAY_MS));
+      setPhase('processing');
+
       const video = videoRef.current;
       let ocr: OcrExtractedFields = { seatNumber: null, applicationNumber: null };
 
@@ -302,12 +308,14 @@ export default function QrScanner() {
             key={flashKey}
             viewBox="0 0 100 100"
             preserveAspectRatio="none"
-            className="qr-lock-flash pointer-events-none absolute inset-0 h-full w-full"
+            className={`qr-lock-flash pointer-events-none absolute inset-0 h-full w-full ${
+              phase === 'holding' ? 'animate-pulse' : ''
+            }`}
           >
             <polygon
               points={lockedOverlay.quadPercent.map((p) => `${p.x},${p.y}`).join(' ')}
               fill="none"
-              stroke="#34d399"
+              stroke={phase === 'holding' ? '#fbbf24' : '#34d399'}
               strokeWidth={0.8}
               vectorEffect="non-scaling-stroke"
             />
@@ -329,6 +337,9 @@ export default function QrScanner() {
 
       <div className="w-full max-w-sm rounded-xl bg-slate-800 p-4 text-center text-slate-100">
         {phase === 'scanning' && <p className="text-slate-400">QRコードをかざしてください</p>}
+        {phase === 'holding' && (
+          <p className="font-medium text-amber-300">そのまま動かさないでください…</p>
+        )}
         {phase === 'processing' && <p className="text-amber-300">読み取り中…</p>}
         {phase === 'result' && lastResult && (
           <div className="space-y-1 text-left text-sm">
