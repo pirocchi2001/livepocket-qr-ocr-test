@@ -58,8 +58,11 @@ export function extractFields(rawOcrText: string): OcrExtractedFields {
   let applicationNumber: string | null = null;
 
   for (const token of tokens) {
-    // チケット番号: 英数字混在で15〜30文字程度の長い塊
-    if (!ticketNumber && token.length >= 15 && token.length <= 30) {
+    // チケット番号: 英字のみで15〜30文字程度の長い塊。
+    // 実際のチケット番号(例: GUZPAJXCBLLIYNTGTSWI)は数字を含まないため、
+    // 数字が混じる塊(日付・時間表記の読み間違いなど)を誤って拾わないよう、
+    // 「英字のみ」を必須条件にしている。
+    if (!ticketNumber && /^[A-Z]{15,30}$/.test(token)) {
       ticketNumber = token;
       continue;
     }
