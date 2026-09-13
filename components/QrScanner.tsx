@@ -19,10 +19,22 @@ interface LastResult {
   ocr: OcrExtractedFields;
 }
 
+interface PercentPoint {
+  x: number;
+  y: number;
+}
+
+interface LockedOverlay {
+  quadPercent: PercentPoint[]; // QRの四隅(0〜100の割合)
+  seatBoxPercent: { x: number; y: number; width: number; height: number }; // 整理番号の推定読み取り範囲(0〜100の割合)
+}
+
 export default function QrScanner() {
   const [phase, setPhase] = useState<Phase>('scanning');
   const [lastResult, setLastResult] = useState<LastResult | null>(null);
   const [errorText, setErrorText] = useState<string | null>(null);
+  const [lockedOverlay, setLockedOverlay] = useState<LockedOverlay | null>(null);
+  const [flashKey, setFlashKey] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -104,14 +116,44 @@ export default function QrScanner() {
     });
 
     if (result && result.data) {
-      void handleScanSuccess(result, dWidth);
+      void handleScanSuccess(result, dWidth, dHeight);
     }
   }
 
-  async function handleScanSuccess(qr: QRCode, detectionWidth: number) {
+  async function handleScanSuccess(qr: QRCode, detectionWidth: number, detectionHeight: number) {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     setPhase('processing');
+
+    // 検出したQRの位置に合わせて、ロックオン表示(緑の枠+読み取り範囲のハイライト)を表示する
+    const toPercent = (p: { x: number; y: number }): PercentPoint => ({
+      x: (p.x / detectionWidth) * 100,
+      y: (p.y / detectionHeight) * 100,
+    });
+    const seatBoxDetectionSpace = computeSeatNumberCropBox(
+      {
+        topLeft: qr.location.topLeftCorner,
+        topRight: qr.location.topRightCorner,
+        bottomLeft: qr.location.bottomLeftCorner,
+      },
+      detectionWidth,
+      detectionHeight
+    );
+    setLockedOverlay({
+      quadPercent: [
+        toPercent(qr.location.topLeftCorner),
+        toPercent(qr.location.topRightCorner),
+        toPercent(qr.location.bottomRightCorner),
+        toPercent(qr.location.bottomLeftCorner),
+      ],
+      seatBoxPercent: {
+        x: (seatBoxDetectionSpace.x / detectionWidth) * 100,
+        y: (seatBoxDetectionSpace.y / detectionHeight) * 100,
+        width: (seatBoxDetectionSpace.width / detectionWidth) * 100,
+        height: (seatBoxDetectionSpace.height / detectionHeight) * 100,
+      },
+    });
+    setFlashKey((k) => k + 1);
 
     try {
       const video = videoRef.current;
@@ -154,12 +196,14 @@ export default function QrScanner() {
 
       setTimeout(() => {
         setPhase('scanning');
+        setLockedOverlay(null);
         isProcessingRef.current = false;
       }, RESULT_DISPLAY_MS);
     } catch (err) {
       console.error('スキャン処理中にエラーが発生しました', err);
       setErrorText('記録に失敗しました。通信状況を確認してください。');
       setPhase('scanning');
+      setLockedOverlay(null);
       isProcessingRef.current = false;
     }
   }
@@ -244,10 +288,41 @@ export default function QrScanner() {
           muted
           playsInline
         />
-        {/* 位置合わせの目安用(切り出し処理には使用していない、見た目のガイドのみ) */}
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div className="h-2/5 w-2/5 rounded-lg border-2 border-emerald-400/70" />
-        </div>
+
+        {/* 探索中: 呼吸するようにパルスするガイド枠(まだQRが見つかっていない間だけ表示) */}
+        {!lockedOverlay && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="h-2/5 w-2/5 animate-pulse rounded-lg border-2 border-emerald-400/60" />
+          </div>
+        )}
+
+        {/* ロックオン: 実際に検出したQRの四隅に合わせた枠+整理番号の読み取り範囲 */}
+        {lockedOverlay && (
+          <svg
+            key={flashKey}
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
+            className="qr-lock-flash pointer-events-none absolute inset-0 h-full w-full"
+          >
+            <polygon
+              points={lockedOverlay.quadPercent.map((p) => `${p.x},${p.y}`).join(' ')}
+              fill="none"
+              stroke="#34d399"
+              strokeWidth={0.8}
+              vectorEffect="non-scaling-stroke"
+            />
+            <rect
+              x={lockedOverlay.seatBoxPercent.x}
+              y={lockedOverlay.seatBoxPercent.y}
+              width={lockedOverlay.seatBoxPercent.width}
+              height={lockedOverlay.seatBoxPercent.height}
+              fill="rgba(251,191,36,0.25)"
+              stroke="#fbbf24"
+              strokeWidth={0.6}
+              vectorEffect="non-scaling-stroke"
+            />
+          </svg>
+        )}
       </div>
 
       {errorText && <p className="text-sm text-red-400">{errorText}</p>}
