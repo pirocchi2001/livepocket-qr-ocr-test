@@ -2,13 +2,15 @@
 
 import { useEffect, useRef, useState } from 'react';
 import jsQR, { QRCode } from 'jsqr';
-import { recognizeWithTimeout, warmUpOcrWorker, OcrExtractedFields } from '@/lib/ocr';
+import { recognizeMultiWithTimeout, warmUpOcrWorker, OcrExtractedFields } from '@/lib/ocr';
 import { saveScan } from '@/lib/scans';
 import { computeSeatNumberCropBox, CropBox } from '@/lib/qr-geometry';
 
 const RESULT_DISPLAY_MS = 900;
 const DETECTION_MAX_SIDE = 480; // QR検出用に縮小するサイズ(速度優先)
 const CROP_UPSCALE_TARGET = 600; // 切り出した整理番号領域を、この幅程度まで拡大してからOCRする
+const NUM_CAPTURES = 3; // 手ブレ対策として複数フレームを撮り、多数決で結果を決める枚数
+const CAPTURE_INTERVAL_MS = 60; // 各フレームキャプチャの間隔
 
 type Phase = 'scanning' | 'processing' | 'result';
 
@@ -25,7 +27,6 @@ export default function QrScanner() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const fullCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const cropCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isProcessingRef = useRef(false);
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -131,9 +132,19 @@ export default function QrScanner() {
         };
 
         const cropBox = computeSeatNumberCropBox(corners, video.videoWidth, video.videoHeight);
-        const cropCanvas = renderCropCanvas(video, cropBox);
-        if (cropCanvas) {
-          ocr = await recognizeWithTimeout(cropCanvas);
+
+        // 手ブレによる1回ごとの失敗をカバーするため、わずかに時間差をつけて複数枚キャプチャする
+        const cropCanvases: HTMLCanvasElement[] = [];
+        for (let i = 0; i < NUM_CAPTURES; i++) {
+          const cropCanvas = renderCropCanvas(video, cropBox);
+          if (cropCanvas) cropCanvases.push(cropCanvas);
+          if (i < NUM_CAPTURES - 1) {
+            await new Promise((resolve) => setTimeout(resolve, CAPTURE_INTERVAL_MS));
+          }
+        }
+
+        if (cropCanvases.length > 0) {
+          ocr = await recognizeMultiWithTimeout(cropCanvases);
         }
       }
 
@@ -164,15 +175,13 @@ export default function QrScanner() {
     if (!fullCtx) return null;
     fullCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
 
-    if (!cropCanvasRef.current) {
-      cropCanvasRef.current = document.createElement('canvas');
-    }
-    const cropCanvas = cropCanvasRef.current;
-
     // 切り出した範囲を、OCRが読みやすい大きさまで拡大する(最大4倍まで)
     const upscale = Math.min(4, Math.max(1, CROP_UPSCALE_TARGET / Math.max(box.width, 1)));
     const outWidth = Math.max(1, Math.round(box.width * upscale));
     const outHeight = Math.max(1, Math.round(box.height * upscale));
+
+    // 複数枚を並行してOCRにかけるため、呼び出すたびに新しいキャンバスを作る
+    const cropCanvas = document.createElement('canvas');
     cropCanvas.width = outWidth;
     cropCanvas.height = outHeight;
 

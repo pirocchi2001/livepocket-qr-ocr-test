@@ -6,31 +6,40 @@ import { createWorker, Worker } from 'tesseract.js';
 // 単語の区切りを保つ目的で空白も許可している。
 const CHAR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ';
 
-// 1回のOCR処理に許容する最大時間(ミリ秒)。これを超えたら結果を破棄してスキップ扱いにする。
-export const OCR_TIME_BUDGET_MS = 1200;
+// 手ブレなどによる1回ごとの失敗をカバーするため、複数枚を並行してOCRにかけ、
+// 多数決で結果を決める。ここではワーカー(≒並行して処理できる数)を3つ用意する。
+const WORKER_POOL_SIZE = 3;
 
-let workerPromise: Promise<Worker> | null = null;
+// 複数枚まとめての処理に許容する合計の最大時間(ミリ秒)。
+// これを超えたら、その時点までに得られた結果だけで多数決を行う。
+export const OCR_TIME_BUDGET_MS = 1500;
+
+let workerPoolPromise: Promise<Worker[]> | null = null;
 let requestSeq = 0;
 
-function getWorker(): Promise<Worker> {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const worker = await createWorker('eng');
-      await worker.setParameters({
-        tessedit_char_whitelist: CHAR_WHITELIST,
-        // 6 = 均一なテキストブロックとして扱う。チケット画面のようにテキストが
-        // 散らばったレイアウトの場合は 11(sparse text)の方が拾いやすいことが多い。
-        tessedit_pageseg_mode: '11' as any,
-      });
-      return worker;
+function getWorkerPool(): Promise<Worker[]> {
+  if (!workerPoolPromise) {
+    workerPoolPromise = (async () => {
+      const workers = await Promise.all(
+        Array.from({ length: WORKER_POOL_SIZE }, async () => {
+          const worker = await createWorker('eng');
+          await worker.setParameters({
+            tessedit_char_whitelist: CHAR_WHITELIST,
+            // 11 = sparse text。チケット画面のように文字が散らばったレイアウトで拾いやすい。
+            tessedit_pageseg_mode: '11' as any,
+          });
+          return worker;
+        })
+      );
+      return workers;
     })();
   }
-  return workerPromise;
+  return workerPoolPromise;
 }
 
 // アプリ起動直後の初回スキャンでワーカー読み込み待ちにならないよう、事前に読み込んでおく
 export function warmUpOcrWorker() {
-  getWorker().catch((err) => {
+  getWorkerPool().catch((err) => {
     console.error('OCRワーカーの初期化に失敗しました', err);
   });
 }
@@ -72,30 +81,82 @@ export function extractFields(rawOcrText: string): OcrExtractedFields {
   return { seatNumber, applicationNumber };
 }
 
-// キャンバス画像に対してOCRを実行し、指定時間内に終わらなければnullを返す(スキップ扱い)。
-// タイムアウト後もワーカー内部の処理は裏で継続させ、結果は破棄する(次回以降に影響しないようリクエストIDで管理)。
-export async function recognizeWithTimeout(
-  canvas: HTMLCanvasElement,
+// 複数の抽出結果を項目ごとに多数決でまとめる。
+// 例: [A907, A907, AS07] → seatNumberは"A907"(2票)を採用。
+// 全部バラバラ(得票数が並ぶ、または全てnull)の場合はnull(未認識)のままにする。
+export function combineByMajorityVote(results: OcrExtractedFields[]): OcrExtractedFields {
+  function majority(values: (string | null)[]): string | null {
+    const counts = new Map<string, number>();
+    for (const v of values) {
+      if (!v) continue;
+      counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    if (counts.size === 0) return null;
+
+    let best: string | null = null;
+    let bestCount = 0;
+    let tie = false;
+    for (const [value, count] of counts) {
+      if (count > bestCount) {
+        best = value;
+        bestCount = count;
+        tie = false;
+      } else if (count === bestCount) {
+        tie = true;
+      }
+    }
+    // 得票数が1票ずつで全員バラバラ(=最多得票が1)の場合は信頼できないため採用しない
+    if (bestCount <= 1 && values.filter(Boolean).length > 1) return null;
+    if (tie) return null;
+    return best;
+  }
+
+  return {
+    seatNumber: majority(results.map((r) => r.seatNumber)),
+    applicationNumber: majority(results.map((r) => r.applicationNumber)),
+  };
+}
+
+// 複数のキャンバス画像に対して並行してOCRを実行し、指定時間内に得られた結果だけで
+// 多数決を行う。ワーカーはキャンバスの数だけ(最大プールサイズまで)並行して使う。
+export async function recognizeMultiWithTimeout(
+  canvases: HTMLCanvasElement[],
   timeoutMs: number = OCR_TIME_BUDGET_MS
 ): Promise<OcrExtractedFields> {
+  if (canvases.length === 0) return EMPTY_FIELDS;
+
   const myRequestId = ++requestSeq;
 
   try {
-    const worker = await getWorker();
+    const workers = await getWorkerPool();
 
-    const recognizePromise = worker.recognize(canvas).then((result) => {
-      // 自分より後の新しいリクエストが発行済みなら、結果は使わない
-      if (myRequestId !== requestSeq) {
-        return EMPTY_FIELDS;
-      }
-      return extractFields(result.data.text ?? '');
+    const attempts = canvases.slice(0, workers.length).map((canvas, i) => {
+      const worker = workers[i];
+      const recognizePromise = worker
+        .recognize(canvas)
+        .then((result) => {
+          if (myRequestId !== requestSeq) return null;
+          return extractFields(result.data.text ?? '');
+        })
+        .catch((err) => {
+          console.error('OCR処理中にエラーが発生しました(この1枚はスキップ)', err);
+          return null;
+        });
+
+      // この1枚がtimeoutMsを超えたら、その1枚だけ諦めてnull扱いにする
+      // (裏では処理が続くが、結果は使わない)
+      const timeoutPromise = new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), timeoutMs);
+      });
+
+      return Promise.race([recognizePromise, timeoutPromise]);
     });
 
-    const timeoutPromise = new Promise<OcrExtractedFields>((resolve) => {
-      setTimeout(() => resolve(EMPTY_FIELDS), timeoutMs);
-    });
+    const results = (await Promise.all(attempts)).filter(
+      (v): v is OcrExtractedFields => !!v
+    );
 
-    return await Promise.race([recognizePromise, timeoutPromise]);
+    return combineByMajorityVote(results);
   } catch (err) {
     console.error('OCR処理中にエラーが発生しました(スキップします)', err);
     return EMPTY_FIELDS;
