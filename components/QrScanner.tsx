@@ -302,7 +302,7 @@ export default function QrScanner() {
         {/* 探索中: 呼吸するようにパルスするガイド枠(まだQRが見つかっていない間だけ表示) */}
         {!lockedOverlay && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div className="h-2/5 w-2/5 animate-pulse rounded-lg border-2 border-emerald-400/60" />
+            <div className="h-2/5 w-2/5 animate-pulse rounded-lg border-4 border-emerald-400" />
           </div>
         )}
 
@@ -320,7 +320,7 @@ export default function QrScanner() {
               points={lockedOverlay.quadPercent.map((p) => `${p.x},${p.y}`).join(' ')}
               fill="none"
               stroke={phase === 'holding' ? '#fbbf24' : '#34d399'}
-              strokeWidth={0.8}
+              strokeWidth={2.2}
               vectorEffect="non-scaling-stroke"
             />
             <rect
@@ -328,9 +328,9 @@ export default function QrScanner() {
               y={lockedOverlay.seatBoxPercent.y}
               width={lockedOverlay.seatBoxPercent.width}
               height={lockedOverlay.seatBoxPercent.height}
-              fill="rgba(251,191,36,0.25)"
+              fill="rgba(251,191,36,0.3)"
               stroke="#fbbf24"
-              strokeWidth={0.6}
+              strokeWidth={1.8}
               vectorEffect="non-scaling-stroke"
             />
           </svg>
