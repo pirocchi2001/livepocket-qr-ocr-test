@@ -13,7 +13,7 @@
     "react-dom": "18.3.1",
     "firebase": "10.14.1",
     "jsqr": "1.4.0",
-    "tesseract.js": "5.1.1"
+    "jszip": "3.10.1"
   },
   "devDependencies": {
     "typescript": "5.5.4",

@@ -1,23 +1,21 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import jsQR, { QRCode } from 'jsqr';
-import { recognizeMultiWithTimeout, warmUpOcrWorker, OcrExtractedFields } from '@/lib/ocr';
 import { saveScan } from '@/lib/scans';
-import { computeSeatNumberCropBox, CropBox } from '@/lib/qr-geometry';
+import { addScanRecord } from '@/lib/local-store';
 
 const RESULT_DISPLAY_MS = 900;
 const DETECTION_MAX_SIDE = 480; // QR検出用に縮小するサイズ(速度優先)
-const CROP_UPSCALE_TARGET = 600; // 切り出した整理番号領域を、この幅程度まで拡大してからOCRする
-const NUM_CAPTURES = 3; // 手ブレ対策として複数フレームを撮り、多数決で結果を決める枚数
-const CAPTURE_INTERVAL_MS = 60; // 各フレームキャプチャの間隔
 const SETTLE_DELAY_MS = 400; // QR検出後、実際の撮影までの「静止待ち」時間
+const CAPTURE_MAX_SIDE = 900; // 保存する画像の長辺サイズ
+const CAPTURE_JPEG_QUALITY = 0.6;
 
 type Phase = 'scanning' | 'holding' | 'processing' | 'result';
 
 interface LastResult {
   rawText: string;
-  ocr: OcrExtractedFields;
 }
 
 interface PercentPoint {
@@ -27,7 +25,6 @@ interface PercentPoint {
 
 interface LockedOverlay {
   quadPercent: PercentPoint[]; // QRの四隅(0〜100の割合)
-  seatBoxPercent: { x: number; y: number; width: number; height: number }; // 整理番号の推定読み取り範囲(0〜100の割合)
 }
 
 export default function QrScanner() {
@@ -39,13 +36,12 @@ export default function QrScanner() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const fullCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isProcessingRef = useRef(false);
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => {
-    warmUpOcrWorker();
     let cancelled = false;
 
     async function start() {
@@ -130,20 +126,11 @@ export default function QrScanner() {
     isProcessingRef.current = true;
     setPhase('holding');
 
-    // 検出したQRの位置に合わせて、ロックオン表示(緑の枠+読み取り範囲のハイライト)を表示する
+    // 検出したQRの位置に合わせて、ロックオン表示(緑の枠)を表示する
     const toPercent = (p: { x: number; y: number }): PercentPoint => ({
       x: (p.x / detectionWidth) * 100,
       y: (p.y / detectionHeight) * 100,
     });
-    const seatBoxDetectionSpace = computeSeatNumberCropBox(
-      {
-        topLeft: qr.location.topLeftCorner,
-        topRight: qr.location.topRightCorner,
-        bottomLeft: qr.location.bottomLeftCorner,
-      },
-      detectionWidth,
-      detectionHeight
-    );
     setLockedOverlay({
       quadPercent: [
         toPercent(qr.location.topLeftCorner),
@@ -151,57 +138,25 @@ export default function QrScanner() {
         toPercent(qr.location.bottomRightCorner),
         toPercent(qr.location.bottomLeftCorner),
       ],
-      seatBoxPercent: {
-        x: (seatBoxDetectionSpace.x / detectionWidth) * 100,
-        y: (seatBoxDetectionSpace.y / detectionHeight) * 100,
-        width: (seatBoxDetectionSpace.width / detectionWidth) * 100,
-        height: (seatBoxDetectionSpace.height / detectionHeight) * 100,
-      },
     });
     setFlashKey((k) => k + 1);
 
     try {
       // QR検出直後は手ブレ・オートフォーカスの途中であることが多いため、
-      // 実際の撮影(OCR用のキャプチャ)は少し待ってから行う
+      // 実際の撮影(保存用のキャプチャ)は少し待ってから行う
       await new Promise((resolve) => setTimeout(resolve, SETTLE_DELAY_MS));
       setPhase('processing');
 
       const video = videoRef.current;
-      let ocr: OcrExtractedFields = { seatNumber: null, applicationNumber: null };
-
       if (video && video.videoWidth > 0) {
-        // 検出時の縮小画像 → 実際の映像解像度へのスケール比
-        const scaleUp = video.videoWidth / detectionWidth;
-        const toFullRes = (p: { x: number; y: number }) => ({
-          x: p.x * scaleUp,
-          y: p.y * scaleUp,
-        });
-
-        const corners = {
-          topLeft: toFullRes(qr.location.topLeftCorner),
-          topRight: toFullRes(qr.location.topRightCorner),
-          bottomLeft: toFullRes(qr.location.bottomLeftCorner),
-        };
-
-        const cropBox = computeSeatNumberCropBox(corners, video.videoWidth, video.videoHeight);
-
-        // 手ブレによる1回ごとの失敗をカバーするため、わずかに時間差をつけて複数枚キャプチャする
-        const cropCanvases: HTMLCanvasElement[] = [];
-        for (let i = 0; i < NUM_CAPTURES; i++) {
-          const cropCanvas = renderCropCanvas(video, cropBox);
-          if (cropCanvas) cropCanvases.push(cropCanvas);
-          if (i < NUM_CAPTURES - 1) {
-            await new Promise((resolve) => setTimeout(resolve, CAPTURE_INTERVAL_MS));
-          }
-        }
-
-        if (cropCanvases.length > 0) {
-          ocr = await recognizeMultiWithTimeout(cropCanvases);
+        const blob = await captureResizedJpeg(video);
+        if (blob) {
+          await addScanRecord(qr.data, Date.now(), blob);
         }
       }
 
-      await saveScan(qr.data, ocr);
-      setLastResult({ rawText: qr.data, ocr });
+      await saveScan(qr.data);
+      setLastResult({ rawText: qr.data });
       setPhase('result');
 
       setTimeout(() => {
@@ -218,74 +173,26 @@ export default function QrScanner() {
     }
   }
 
-  function renderCropCanvas(video: HTMLVideoElement, box: CropBox): HTMLCanvasElement | null {
-    if (!fullCanvasRef.current) {
-      fullCanvasRef.current = document.createElement('canvas');
+  // カメラのフル画面フレームを1枚キャプチャし、長辺 CAPTURE_MAX_SIDE 程度にリサイズして
+  // JPEG化する(あとで人間が目視確認するための保存用画像)。
+  function captureResizedJpeg(video: HTMLVideoElement): Promise<Blob | null> {
+    const scale = Math.min(1, CAPTURE_MAX_SIDE / Math.max(video.videoWidth, video.videoHeight));
+    const outWidth = Math.max(1, Math.round(video.videoWidth * scale));
+    const outHeight = Math.max(1, Math.round(video.videoHeight * scale));
+
+    if (!captureCanvasRef.current) {
+      captureCanvasRef.current = document.createElement('canvas');
     }
-    const fullCanvas = fullCanvasRef.current;
-    fullCanvas.width = video.videoWidth;
-    fullCanvas.height = video.videoHeight;
-    const fullCtx = fullCanvas.getContext('2d');
-    if (!fullCtx) return null;
-    fullCtx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+    const canvas = captureCanvasRef.current;
+    canvas.width = outWidth;
+    canvas.height = outHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return Promise.resolve(null);
+    ctx.drawImage(video, 0, 0, outWidth, outHeight);
 
-    // 切り出した範囲を、OCRが読みやすい大きさまで拡大する(最大4倍まで)
-    const upscale = Math.min(4, Math.max(1, CROP_UPSCALE_TARGET / Math.max(box.width, 1)));
-    const outWidth = Math.max(1, Math.round(box.width * upscale));
-    const outHeight = Math.max(1, Math.round(box.height * upscale));
-
-    // 複数枚を並行してOCRにかけるため、呼び出すたびに新しいキャンバスを作る
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = outWidth;
-    cropCanvas.height = outHeight;
-
-    const ctx = cropCanvas.getContext('2d');
-    if (!ctx) return null;
-    ctx.drawImage(
-      fullCanvas,
-      box.x,
-      box.y,
-      box.width,
-      box.height,
-      0,
-      0,
-      outWidth,
-      outHeight
-    );
-
-    applyGrayscaleContrastEnhancement(ctx, outWidth, outHeight);
-
-    return cropCanvas;
-  }
-
-  // グレースケール化+コントラスト強調(ヒストグラムの最小・最大値で引き伸ばす)。
-  function applyGrayscaleContrastEnhancement(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number
-  ) {
-    const imageData = ctx.getImageData(0, 0, width, height);
-    const data = imageData.data;
-    const grayValues = new Uint8ClampedArray(data.length / 4);
-
-    let min = 255;
-    let max = 0;
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      grayValues[p] = gray;
-      if (gray < min) min = gray;
-      if (gray > max) max = gray;
-    }
-
-    const range = Math.max(1, max - min);
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      const stretched = ((grayValues[p] - min) / range) * 255;
-      data[i] = stretched;
-      data[i + 1] = stretched;
-      data[i + 2] = stretched;
-    }
-
-    ctx.putImageData(imageData, 0, 0);
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', CAPTURE_JPEG_QUALITY);
+    });
   }
 
   return (
@@ -306,7 +213,7 @@ export default function QrScanner() {
           </div>
         )}
 
-        {/* ロックオン: 実際に検出したQRの四隅に合わせた枠+整理番号の読み取り範囲 */}
+        {/* ロックオン: 実際に検出したQRの四隅に合わせた枠 */}
         {lockedOverlay && (
           <svg
             key={flashKey}
@@ -323,16 +230,6 @@ export default function QrScanner() {
               strokeWidth={2.2}
               vectorEffect="non-scaling-stroke"
             />
-            <rect
-              x={lockedOverlay.seatBoxPercent.x}
-              y={lockedOverlay.seatBoxPercent.y}
-              width={lockedOverlay.seatBoxPercent.width}
-              height={lockedOverlay.seatBoxPercent.height}
-              fill="rgba(251,191,36,0.3)"
-              stroke="#fbbf24"
-              strokeWidth={1.8}
-              vectorEffect="non-scaling-stroke"
-            />
           </svg>
         )}
       </div>
@@ -344,15 +241,21 @@ export default function QrScanner() {
         {phase === 'holding' && (
           <p className="font-medium text-amber-300">そのまま動かさないでください…</p>
         )}
-        {phase === 'processing' && <p className="text-amber-300">読み取り中…</p>}
+        {phase === 'processing' && <p className="text-amber-300">保存中…</p>}
         {phase === 'result' && lastResult && (
           <div className="space-y-1 text-left text-sm">
             <p className="break-all text-emerald-400">読み取りました: {lastResult.rawText}</p>
-            <p>整理番号: {lastResult.ocr.seatNumber ?? '(未認識)'}</p>
-            <p>申込番号: {lastResult.ocr.applicationNumber ?? '(未認識)'}</p>
+            <p className="text-slate-400">画像を端末に保存しました</p>
           </div>
         )}
       </div>
+
+      <Link
+        href="/gallery"
+        className="w-full max-w-sm rounded-xl bg-slate-700 p-3 text-center text-sm font-medium text-slate-100 hover:bg-slate-600"
+      >
+        保存した画像を見る
+      </Link>
     </div>
   );
 }

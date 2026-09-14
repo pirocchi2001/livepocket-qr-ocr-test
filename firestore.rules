@@ -7,19 +7,10 @@ service cloud.firestore {
       // PC画面での一覧購読のため、認証なしでも1回のクエリ最大300件までは許可
       allow list: if request.query.limit != null && request.query.limit <= 300;
 
-      allow create: if request.resource.data.keys().hasOnly([
-                        'scannedAt', 'rawText',
-                        'ocrSeatNumber', 'ocrApplicationNumber'
-                      ])
+      allow create: if request.resource.data.keys().hasOnly(['scannedAt', 'rawText'])
                     && request.resource.data.scannedAt == request.time
                     && request.resource.data.rawText is string
-                    && request.resource.data.rawText.size() <= 2000
-                    && (!('ocrSeatNumber' in request.resource.data)
-                        || (request.resource.data.ocrSeatNumber is string
-                            && request.resource.data.ocrSeatNumber.size() <= 50))
-                    && (!('ocrApplicationNumber' in request.resource.data)
-                        || (request.resource.data.ocrApplicationNumber is string
-                            && request.resource.data.ocrApplicationNumber.size() <= 50));
+                    && request.resource.data.rawText.size() <= 2000;
 
       allow update: if false;
       allow delete: if false;
